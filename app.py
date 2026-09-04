@@ -1,14 +1,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_provider import (
-    load_daily, load_monthly, load_overview, load_intraday, OpenChartNSEProvider
-)
+from data_provider import load_daily, load_monthly, load_overview, load_intraday
 from engine import analyze
 
 st.set_page_config(
@@ -30,10 +27,11 @@ with st.sidebar:
 
     horizon = st.selectbox("Horizon", ["Intraday", "Short-term", "Long-term"])
 
+    # Keep the UI exactly aligned with the intervals supported by the NSE provider.
     interval = st.selectbox(
         "Intraday timeframe",
-        ["1m","3m","5m","10m","15m","30m","1h"],
-        index=2,
+        ["1m", "5m", "10m", "15m", "30m", "1h"],
+        index=1,
         disabled=horizon != "Intraday",
     )
 
@@ -59,10 +57,8 @@ with st.sidebar:
             "The intraday pipeline never calls Alpha Vantage. "
             "Fetched OHLCV is automatically written to .data_cache/intraday_csv/."
         )
-        uploaded = None
     else:
-        st.info("Daily/monthly/fundamental context uses Alpha Vantage in this V3.2 build.")
-        uploaded = None
+        st.info("Daily/monthly/fundamental context uses Alpha Vantage.")
 
 if analyze_btn:
     if not symbol:
@@ -72,20 +68,15 @@ if analyze_btn:
     with st.spinner(f"Fetching and analysing {symbol}…"):
         try:
             if horizon == "Intraday":
-                df = pd.DataFrame()
                 source = "NSE charting / OpenChart-compatible API (automatic CSV recovery enabled)"
-                provider_status = {}
-                try:
-                    df = load_intraday(symbol, interval, lookback, force_refresh=force_refresh)
-                    provider_status = df.attrs.get("provider_status", {})
-                except Exception as exc:
-                    raise RuntimeError(str(exc))
+                df = load_intraday(symbol, interval, lookback, force_refresh=force_refresh)
+                provider_status = df.attrs.get("provider_status", {})
 
                 if df.empty:
                     st.error("No usable intraday candles are available from NSE or the automatic CSV recovery cache.")
                     st.warning(
                         "This is a DATA FAILURE, not a trading PASS. "
-                        "Try 5m/15m, refresh, or use the CSV fallback."
+                        "Try another supported timeframe or refresh later."
                     )
                     st.stop()
 
@@ -108,6 +99,7 @@ if analyze_btn:
                 )
                 source = "Alpha Vantage daily + overview"
                 monthly = load_monthly(symbol) if horizon == "Long-term" else pd.DataFrame()
+                provider_status = {}
 
         except Exception as exc:
             st.exception(exc)
@@ -134,23 +126,23 @@ if analyze_btn:
 
     st.markdown(f"## {symbol} — {horizon}")
 
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Decision", dec["verdict"])
     c2.metric("Composite score", f"{dec['score']:.1f}" if pd.notna(dec["score"]) else "NA")
     c3.metric("Last price", f"₹{df.close.iloc[-1]:,.2f}")
     c4.metric("Data quality", q["grade"])
 
-    tabs = st.tabs(["Decision","Chart & Signals","Fundamentals","Data Quality","Validation"])
+    tabs = st.tabs(["Decision", "Chart & Signals", "Fundamentals", "Data Quality", "Validation"])
 
     with tabs[0]:
-        p1,p2,p3,p4 = st.columns(4)
-        p1.metric("Preferred entry", f"₹{plan.get('entry_low',float('nan')):,.2f}–₹{plan.get('entry_high',float('nan')):,.2f}")
-        p2.metric("Stop", f"₹{plan.get('stop',float('nan')):,.2f}")
-        p3.metric("Target 1", f"₹{plan.get('target1',float('nan')):,.2f}")
-        p4.metric("R:R", f"1:{plan.get('rr1',float('nan')):.2f}")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Preferred entry", f"₹{plan.get('entry_low', float('nan')):,.2f}–₹{plan.get('entry_high', float('nan')):,.2f}")
+        p2.metric("Stop", f"₹{plan.get('stop', float('nan')):,.2f}")
+        p3.metric("Target 1", f"₹{plan.get('target1', float('nan')):,.2f}")
+        p4.metric("R:R", f"1:{plan.get('rr1', float('nan')):.2f}")
 
         st.markdown("### Why")
-        st.write(f"Technical score: **{tech.get('score','NA')}** ({tech.get('confidence','—')} confidence)")
+        st.write(f"Technical score: **{tech.get('score', 'NA')}** ({tech.get('confidence', '—')} confidence)")
         if pd.notna(fund.get("score", float("nan"))):
             st.write(f"Fundamental score: **{fund['score']}**")
         st.write(f"Latest candle: **{result['candle_pattern']}**")
@@ -167,9 +159,9 @@ if analyze_btn:
                 low=z.low, close=z.close, name="Price"
             )]
         )
-        for col,label in [
-            ("ema9","EMA9"),("ema20","EMA20"),
-            ("ema50","EMA50"),("ema200","EMA200")
+        for col, label in [
+            ("ema9", "EMA9"), ("ema20", "EMA20"),
+            ("ema50", "EMA50"), ("ema200", "EMA200")
         ]:
             if col in z and z[col].notna().any():
                 fig.add_trace(go.Scatter(x=z.index, y=z[col], name=label, mode="lines"))
@@ -178,7 +170,7 @@ if analyze_btn:
         fig.update_layout(
             height=620,
             xaxis_rangeslider_visible=False,
-            margin=dict(l=10,r=10,t=30,b=10)
+            margin=dict(l=10, r=10, t=30, b=10)
         )
         st.plotly_chart(fig, use_container_width=True)
         st.markdown("### Signals")
@@ -195,7 +187,7 @@ if analyze_btn:
             st.dataframe(
                 pd.DataFrame(
                     list(fund.get("items", {}).items()),
-                    columns=["Metric","Value"]
+                    columns=["Metric", "Value"]
                 ),
                 use_container_width=True, hide_index=True
             )
@@ -210,11 +202,11 @@ if analyze_btn:
         st.write("**Indicator availability**")
         avail = {
             k: ("Available" if result["data"][k].notna().any() else "Unavailable")
-            for k in ["ema9","ema20","ema50","ema200","rsi14","macd","atr14","rel_volume"]
+            for k in ["ema9", "ema20", "ema50", "ema200", "rsi14", "macd", "atr14", "rel_volume"]
             if k in result["data"]
         }
         st.dataframe(
-            pd.DataFrame(list(avail.items()), columns=["Indicator","Status"]),
+            pd.DataFrame(list(avail.items()), columns=["Indicator", "Status"]),
             use_container_width=True, hide_index=True
         )
         if q["rows"] < q["required"]:
@@ -224,13 +216,13 @@ if analyze_btn:
             )
 
     with tabs[4]:
-        st.metric("Validation status", bt.get("status","—"))
+        st.metric("Validation status", bt.get("status", "—"))
         vcols = st.columns(5)
-        vcols[0].metric("Observations", bt.get("observations",0))
-        vcols[1].metric("Win rate", f"{100*bt['win_rate']:.1f}%" if "win_rate" in bt else "—")
-        vcols[2].metric("Expectancy", f"{100*bt['expectancy']:.2f}%" if "expectancy" in bt else "—")
+        vcols[0].metric("Observations", bt.get("observations", 0))
+        vcols[1].metric("Win rate", f"{100 * bt['win_rate']:.1f}%" if "win_rate" in bt else "—")
+        vcols[2].metric("Expectancy", f"{100 * bt['expectancy']:.2f}%" if "expectancy" in bt else "—")
         vcols[3].metric("Profit factor", f"{bt['profit_factor']:.2f}" if "profit_factor" in bt and bt['profit_factor'] != float('inf') else "∞")
-        vcols[4].metric("Max drawdown", f"{100*bt['max_drawdown']:.1f}%" if "max_drawdown" in bt else "—")
+        vcols[4].metric("Max drawdown", f"{100 * bt['max_drawdown']:.1f}%" if "max_drawdown" in bt else "—")
         st.caption(
             "Validation is conservative: fewer than 30 signal observations is exploratory. "
             "Costs/slippage are included in the displayed test."
