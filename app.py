@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pandas as pd
@@ -10,7 +9,7 @@ from engine import analyze
 
 st.set_page_config(page_title="Indian Stock Analysis Engine V3.3", page_icon="📈", layout="wide")
 st.markdown("# 📈 Indian Stock Analysis Engine")
-st.caption("V3.3 • Intraday-first pipeline • NSE/OpenChart primary • Yahoo recovery • automatic CSV cache • no Alpha Vantage in intraday")
+st.caption("V3.3 • Intraday-first pipeline • NSE/OpenChart primary • Yahoo recovery • daily Yahoo/Alpha Vantage fallback • automatic CSV cache")
 
 with st.sidebar:
     st.header("Analysis")
@@ -25,7 +24,8 @@ with st.sidebar:
         st.success("INTRADAY SOURCE\nOpenChart/NSE → Yahoo recovery → CSV")
         st.caption("Alpha Vantage is never called by the intraday pipeline.")
     else:
-        st.info("Daily/monthly/fundamental context uses Alpha Vantage.")
+        st.info("DAILY/MONTHLY SOURCE\nYahoo Finance NSE → Alpha Vantage fallback")
+        st.caption("Alpha Vantage remains the fundamentals provider. Daily OHLCV no longer depends on it being available.")
 
 if analyze_btn:
     if not symbol:
@@ -46,14 +46,14 @@ if analyze_btn:
                 source = provider_status.get("provider", "Intraday provider")
             else:
                 df = load_daily(symbol)
+                provider_status = df.attrs.get("provider_status", {})
                 if df.empty:
-                    st.error("No daily data returned. Check the symbol or Alpha Vantage entitlement/rate limit.")
+                    st.error("No usable daily data returned.")
                     st.stop()
                 fundamentals = load_overview(symbol)
                 result = analyze(df, horizon, intraday=False, fundamentals=fundamentals, interval="1d")
-                source = "Alpha Vantage daily + overview"
+                source = provider_status.get("provider", "Daily provider")
                 monthly = load_monthly(symbol) if horizon == "Long-term" else pd.DataFrame()
-                provider_status = {}
         except Exception as exc:
             st.error("DATA PROVIDER FAILURE")
             st.exception(exc)
@@ -61,13 +61,16 @@ if analyze_btn:
 
     q, dec, tech, fund, plan, bt = result["quality"], result["decision"], result["technical"], result["fundamental"], result["plan"], result["backtest"]
     st.success(f"Data source: {source}")
-    if horizon == "Intraday" and provider_status:
+    if provider_status:
         src_type = provider_status.get("source_type", "unknown")
-        st.caption(f"Actual intraday transport: {src_type} • {provider_status.get('rows', len(df))} candles")
-        if provider_status.get("live_error"):
+        st.caption(f"Actual transport: {src_type} • {provider_status.get('rows', len(df))} observations")
+        if provider_status.get("live_error") or provider_status.get("error"):
             with st.expander("Provider diagnostic", expanded=False):
-                st.code(str(provider_status["live_error"]))
-        st.caption("Flow: live intraday transport → OHLCV normalization → canonical CSV → V3 analysis. Alpha Vantage is not in this path.")
+                st.code(str(provider_status.get("live_error") or provider_status.get("error")))
+        if horizon != "Intraday":
+            ticker = provider_status.get("ticker")
+            if ticker:
+                st.caption(f"Market-data ticker: {ticker}")
 
     st.markdown(f"## {symbol} — {horizon}")
     c1, c2, c3, c4 = st.columns(4)
@@ -126,4 +129,4 @@ if analyze_btn:
         st.caption("Fewer than 30 signal observations is exploratory. Costs/slippage are included in the displayed test.")
 else:
     st.markdown("### Start here")
-    st.write("Enter an NSE stock symbol and choose a horizon. Intraday uses OpenChart/NSE first, then a secondary intraday recovery source, then the canonical CSV cache. Alpha Vantage is never used for intraday.")
+    st.write("Enter an NSE stock symbol and choose a horizon. Intraday uses OpenChart/NSE first, then Yahoo recovery, then canonical CSV. Short/Long-term uses Yahoo Finance NSE daily/monthly data first, with Alpha Vantage fallback; fundamentals remain Alpha Vantage based.")
