@@ -51,15 +51,15 @@ if analyze_btn:
                     st.error("No usable daily data returned.")
                     st.stop()
                 fundamentals = load_overview(symbol)
-                result = analyze(df, horizon, intraday=False, fundamentals=fundamentals, interval="1d")
-                source = provider_status.get("provider", "Daily provider")
                 monthly = load_monthly(symbol) if horizon == "Long-term" else pd.DataFrame()
+                result = analyze(df, horizon, intraday=False, fundamentals=fundamentals, interval="1d", monthly=monthly)
+                source = provider_status.get("provider", "Daily provider")
         except Exception as exc:
             st.error("DATA PROVIDER FAILURE")
             st.exception(exc)
             st.stop()
 
-    q, dec, tech, fund, plan, bt = result["quality"], result["decision"], result["technical"], result["fundamental"], result["plan"], result["backtest"]
+    q, dec, tech, month, fund, plan, bt = result["quality"], result["decision"], result["technical"], result.get("monthly", {}), result["fundamental"], result["plan"], result["backtest"]
     st.success(f"Data source: {source}")
     if provider_status:
         src_type = provider_status.get("source_type", "unknown")
@@ -69,8 +69,7 @@ if analyze_btn:
                 st.code(str(provider_status.get("live_error") or provider_status.get("error")))
         if horizon != "Intraday":
             ticker = provider_status.get("ticker")
-            if ticker:
-                st.caption(f"Market-data ticker: {ticker}")
+            if ticker: st.caption(f"Market-data ticker: {ticker}")
 
     st.markdown(f"## {symbol} — {horizon}")
     c1, c2, c3, c4 = st.columns(4)
@@ -88,6 +87,8 @@ if analyze_btn:
         p4.metric("R:R", f"1:{plan.get('rr1', float('nan')):.2f}")
         st.markdown("### Why")
         st.write(f"Technical score: **{tech.get('score', 'NA')}** ({tech.get('confidence', '—')} confidence)")
+        if horizon == "Long-term" and pd.notna(month.get("score")):
+            st.write(f"Monthly market-regime score: **{month['score']}** ({month.get('confidence', '—')} confidence)")
         if pd.notna(fund.get("score", float("nan"))): st.write(f"Fundamental score: **{fund['score']}**")
         st.write(f"Latest candle: **{result['candle_pattern']}**")
         st.caption("A BUY/SETUP verdict is a research signal, not a guarantee.")
@@ -109,13 +110,19 @@ if analyze_btn:
         else:
             st.metric("Fundamental score", f"{fund['score']:.1f}" if pd.notna(fund.get("score")) else "Unavailable")
             st.dataframe(pd.DataFrame(list(fund.get("items", {}).items()), columns=["Metric", "Value"]), use_container_width=True, hide_index=True)
-            if horizon == "Long-term" and not monthly.empty:
-                st.caption(f"Monthly context: {len(monthly)} observations available from {monthly.index.min().date()} to {monthly.index.max().date()}.")
+            if horizon == "Long-term" and month:
+                st.markdown("### Monthly market regime")
+                st.metric("Monthly regime score", f"{month['score']:.1f}" if pd.notna(month.get("score")) else "Unavailable")
+                st.dataframe(pd.DataFrame(list(month.get("items", {}).items()), columns=["Monthly signal", "Value"]), use_container_width=True, hide_index=True)
+                if month.get("observations"):
+                    st.caption(f"Monthly context: {month['observations']} observations from {pd.Timestamp(month['start']).date()} to {pd.Timestamp(month['end']).date()}.")
 
     with tabs[3]:
         st.dataframe(pd.DataFrame([q]), use_container_width=True, hide_index=True)
         avail = {k: ("Available" if result["data"][k].notna().any() else "Unavailable") for k in ["ema9", "ema20", "ema50", "ema200", "rsi14", "macd", "atr14", "rel_volume"] if k in result["data"]}
         st.dataframe(pd.DataFrame(list(avail.items()), columns=["Indicator", "Status"]), use_container_width=True, hide_index=True)
+        if horizon == "Long-term":
+            st.caption(f"Daily observations: {len(df)} • Monthly observations used in score: {month.get('observations', 0)}")
         if q["rows"] < q["required"]: st.warning("The dataset is below the engine's preferred size for validation.")
 
     with tabs[4]:
@@ -126,7 +133,7 @@ if analyze_btn:
         vcols[2].metric("Expectancy", f"{100 * bt['expectancy']:.2f}%" if "expectancy" in bt else "—")
         vcols[3].metric("Profit factor", f"{bt['profit_factor']:.2f}" if "profit_factor" in bt and bt['profit_factor'] != float('inf') else "∞")
         vcols[4].metric("Max drawdown", f"{100 * bt['max_drawdown']:.1f}%" if "max_drawdown" in bt else "—")
-        st.caption("Fewer than 30 signal observations is exploratory. Costs/slippage are included in the displayed test.")
+        st.caption("Fewer than 30 signal observations is exploratory. Costs/slippage are included in the displayed test; entry is the next bar close.")
 else:
     st.markdown("### Start here")
-    st.write("Enter an NSE stock symbol and choose a horizon. Intraday uses OpenChart/NSE first, then Yahoo recovery, then canonical CSV. Short/Long-term uses Yahoo Finance NSE daily/monthly data first, with Alpha Vantage fallback; fundamentals remain Alpha Vantage based.")
+    st.write("Enter an NSE stock symbol and choose a horizon. Intraday uses OpenChart/NSE first, then Yahoo recovery, then canonical CSV. Short/Long-term uses Yahoo Finance NSE daily/monthly data first, with Alpha Vantage fallback; fundamentals remain Alpha Vantage based. Long-term scoring also incorporates monthly market-regime context.")
