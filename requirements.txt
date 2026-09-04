@@ -4,3 +4,4 @@ numpy>=1.26,<3
 requests>=2.31,<3
 plotly>=5.20,<7
 openchart==0.2.0
+yfinance>=0.2.50,<1
