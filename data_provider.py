@@ -14,14 +14,17 @@ try:
 except Exception:
     st = None
 
-# OpenChart is the intraday transport. It uses NSE's public charting data.
 try:
     from openchart import NSEData
 except Exception:
     NSEData = None
 
-AV_URL = "https://www.alphavantage.co/query"
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
+AV_URL = "https://www.alphavantage.co/query"
 ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / ".data_cache"
 CSV_CACHE_DIR = CACHE_DIR / "intraday_csv"
@@ -71,31 +74,24 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
 
     out = df.copy()
-    # OpenChart returns Open/High/Low/Close/Volume and Timestamp.
-    rename = {}
-    for c in out.columns:
-        k = str(c).strip().lower()
-        rename[c] = {
-            "open": "open", "high": "high", "low": "low",
-            "close": "close", "volume": "volume",
-            "timestamp": "timestamp", "date": "timestamp",
-        }.get(k, c)
-    out = out.rename(columns=rename)
-
-    if "timestamp" in out.columns:
-        out = out.set_index("timestamp")
+    lookup = {str(c).strip().lower(): c for c in out.columns}
+    if "timestamp" in lookup:
+        out = out.set_index(lookup["timestamp"])
+    elif "date" in lookup:
+        out = out.set_index(lookup["date"])
 
     data = pd.DataFrame(index=out.index)
-    for c in cols:
-        if c in out.columns:
-            data[c] = pd.to_numeric(out[c], errors="coerce")
+    for target in cols:
+        src = lookup.get(target)
+        if src is not None:
+            data[target] = pd.to_numeric(out[src], errors="coerce")
     for c in ["open", "high", "low", "close"]:
         if c not in data.columns:
             raise ValueError(f"Missing OHLC column: {c}")
     if "volume" not in data.columns:
         data["volume"] = 0.0
 
-    idx = data.index
+    idx = pd.Index(data.index)
     if pd.api.types.is_numeric_dtype(pd.Series(idx)):
         vals = pd.to_numeric(idx, errors="coerce")
         finite = vals[pd.notna(vals)]
@@ -121,15 +117,10 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 def _read_cached_csv(symbol: str, interval: str, max_age_days: int = 7) -> pd.DataFrame:
     path = CSV_CACHE_DIR / f"{_safe(symbol.upper())}_{interval}.csv"
-    if not path.exists():
-        return pd.DataFrame()
-    if time.time() - path.stat().st_mtime > max_age_days * 86400:
+    if not path.exists() or time.time() - path.stat().st_mtime > max_age_days * 86400:
         return pd.DataFrame()
     try:
-        raw = pd.read_csv(path)
-        if "timestamp" not in raw.columns:
-            return pd.DataFrame()
-        return _normalize_ohlcv(raw)
+        return _normalize_ohlcv(pd.read_csv(path))
     except Exception:
         return pd.DataFrame()
 
@@ -143,131 +134,143 @@ def _write_csv(df: pd.DataFrame, symbol: str, interval: str) -> Path:
 
 
 class OpenChartNSEProvider:
-    """Intraday provider backed by the current openchart Python package.
-
-    Alpha Vantage is deliberately not imported or called from this class.
-    """
+    """Primary intraday provider: OpenChart -> NSE charting."""
 
     INTERVALS = {"1m", "5m", "10m", "15m", "30m", "1h"}
 
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
         self.last_status: Dict[str, Any] = {}
-        self.client = None
-
-    def _client(self):
         if NSEData is None:
-            raise RuntimeError("The openchart package is not installed. Redeploy so requirements.txt installs it.")
-        if self.client is None:
-            self.client = NSEData()
-        return self.client
-
-    def resolve(self, symbol: str) -> Dict[str, Any]:
-        s = symbol.strip().upper()
-        nse = self._client()
-        result = nse.search(s, "EQ")
-        if result is None or result.empty:
-            raise ValueError(f"NSE/OpenChart could not resolve '{s}'. Use an NSE equity symbol such as RELIANCE, TCS, INFY or RVNL.")
-        df = result.copy()
-        u = df["symbol"].astype(str).str.upper()
-        exact = df[u == s]
-        suffixed = df[u == f"{s}-EQ"]
-        row = exact.iloc[0] if not exact.empty else suffixed.iloc[0] if not suffixed.empty else df.iloc[0]
-        return row.to_dict()
+            raise RuntimeError("OpenChart is not installed. Redeploy so requirements.txt installs it.")
+        self.client = NSEData()
 
     def historical(self, symbol: str, start: datetime, end: datetime, interval: str = "5m", force_refresh: bool = False) -> pd.DataFrame:
         if interval not in self.INTERVALS:
             raise ValueError(f"Unsupported intraday interval: {interval}")
 
-        info = self.resolve(symbol)
-        cache_key = f"{symbol}_{interval}_{start:%Y%m%d%H%M}_{end:%Y%m%d%H%M}"
+        s = symbol.strip().upper()
+        cache_key = f"{s}_{interval}_{start:%Y%m%d%H%M}_{end:%Y%m%d%H%M}"
         if not force_refresh:
             cached = _load_pickle("nse_hist", cache_key, 60)
             if cached is not None and not cached.empty:
                 self.last_status = {"provider": "OpenChart", "source_type": "disk cache", "rows": len(cached)}
                 return cached
 
-        nse = self._client()
-        token = str(info.get("scripcode", ""))
-        display_symbol = str(info.get("symbol", symbol))
-        symbol_type = str(info.get("type", "Equity"))
+        # The package's documented historical() path performs its own symbol
+        # resolution and constructs the NSE charting request. This is more
+        # robust than manually supplying the token to historical_direct().
+        try:
+            raw = self.client.historical(s, "EQ", start, end, interval)
+        except Exception as exc:
+            raise RuntimeError(f"OpenChart/NSE request failed: {exc}") from exc
 
-        # OpenChart's documented API uses historical_direct with the resolved token.
-        data = nse.historical_direct(
-            token=token,
-            symbol=display_symbol,
-            symbol_type=symbol_type,
-            start=start,
-            end=end,
-            interval=interval,
-        )
-        df = _normalize_ohlcv(data)
+        df = _normalize_ohlcv(pd.DataFrame(raw) if raw is not None else pd.DataFrame())
         if df.empty:
             raise RuntimeError("OpenChart/NSE returned no intraday candles")
 
-        path = _write_csv(df, symbol, interval)
+        path = _write_csv(df, s, interval)
         _save_pickle("nse_hist", cache_key, df)
         self.last_status = {
-            "provider": "OpenChart",
+            "provider": "OpenChart/NSE",
             "source_type": "fresh NSE fetch",
             "rows": len(df),
-            "symbol": display_symbol,
             "csv_path": str(path),
         }
         return df
 
 
-def load_intraday(symbol: str, interval: str = "5m", lookback_days: int = 5, force_refresh: bool = False) -> pd.DataFrame:
-    """Intraday-only data entry point.
+class YahooIntradayProvider:
+    """Secondary recovery provider when NSE charting is unavailable.
 
-    Live retrieval uses OpenChart/NSE. We deliberately try short windows first because
-    NSE charting availability can vary by symbol and requested history. If live retrieval
-    fails, the previously fetched canonical CSV is used. Alpha Vantage is never called.
+    Yahoo is not used for fundamentals/daily analysis here. It is only a
+    recovery transport for intraday OHLCV, and its use is explicitly surfaced
+    in the UI so the user knows the source changed.
+    """
+
+    INTERVAL_MAP = {"1m": "1m", "5m": "5m", "10m": "5m", "15m": "15m", "30m": "30m", "1h": "60m"}
+
+    def historical(self, symbol: str, start: datetime, end: datetime, interval: str) -> pd.DataFrame:
+        if yf is None:
+            raise RuntimeError("yfinance is not installed")
+        yahoo_interval = self.INTERVAL_MAP[interval]
+        period_days = max(2, (end.date() - start.date()).days + 1)
+        # Yahoo's intraday retention is limited; request only what can be
+        # reasonably returned, then let normalization/caching handle it.
+        if yahoo_interval == "1m":
+            period = f"{min(period_days, 7)}d"
+        else:
+            period = f"{min(period_days, 60)}d"
+        ticker = yf.Ticker(f"{symbol.upper()}.NS")
+        raw = ticker.history(period=period, interval=yahoo_interval, auto_adjust=False, prepost=False, timeout=20)
+        if raw is None or raw.empty:
+            raise RuntimeError("Yahoo Finance returned no intraday candles")
+        raw = raw.reset_index()
+        df = _normalize_ohlcv(raw)
+        if df.empty:
+            raise RuntimeError("Yahoo Finance returned no usable intraday candles")
+        if interval in {"10m", "1h"}:
+            rule = "10min" if interval == "10m" else "60min"
+            df = df.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        return df
+
+
+def load_intraday(symbol: str, interval: str = "5m", lookback_days: int = 5, force_refresh: bool = False) -> pd.DataFrame:
+    """Intraday pipeline: OpenChart/NSE -> Yahoo recovery -> canonical CSV.
+
+    Alpha Vantage is deliberately never called from this function.
     """
     symbol = symbol.strip().upper()
     lookback = max(2, int(lookback_days))
     end = datetime.now()
-    provider = OpenChartNSEProvider()
-    live_errors = []
+    start = end - timedelta(days=lookback)
+    errors = []
 
-    # Shortest reliable request first; then expand if successful.
-    windows = []
-    for days in [min(5, lookback), lookback]:
-        if days not in windows:
-            windows.append(days)
+    try:
+        provider = OpenChartNSEProvider()
+        df = provider.historical(symbol, start, end, interval, force_refresh=force_refresh)
+        if not df.empty:
+            df.attrs["provider_status"] = dict(provider.last_status)
+            return df
+    except Exception as exc:
+        errors.append(f"OpenChart/NSE: {exc}")
 
-    for days in windows:
-        start = end - timedelta(days=days)
-        try:
-            df = provider.historical(symbol, start, end, interval, force_refresh=force_refresh)
-            if not df.empty:
-                df.attrs["provider_status"] = dict(provider.last_status)
-                return df
-        except Exception as exc:
-            live_errors.append(f"{days}d window: {exc}")
-            # A retry with a smaller request is useful for NSE/OpenChart transient failures.
-            time.sleep(0.5)
+    try:
+        provider = YahooIntradayProvider()
+        df = provider.historical(symbol, start, end, interval)
+        if not df.empty:
+            path = _write_csv(df, symbol, interval)
+            status = {
+                "provider": "Yahoo Finance",
+                "source_type": "secondary intraday recovery",
+                "rows": len(df),
+                "csv_path": str(path),
+                "live_error": " | ".join(errors),
+            }
+            df.attrs["provider_status"] = status
+            return df
+    except Exception as exc:
+        errors.append(f"Yahoo Finance: {exc}")
 
     cached = _read_cached_csv(symbol, interval, max_age_days=max(7, lookback + 2))
     if not cached.empty:
-        provider.last_status = {
-            "provider": "OpenChart",
+        status = {
+            "provider": "Cached canonical CSV",
             "source_type": "automatic CSV recovery",
             "rows": len(cached),
-            "live_error": " | ".join(live_errors),
+            "live_error": " | ".join(errors),
         }
-        cached.attrs["provider_status"] = dict(provider.last_status)
+        cached.attrs["provider_status"] = status
         return cached
 
-    detail = " | ".join(live_errors) if live_errors else "unknown provider error"
     raise RuntimeError(
-        "Intraday data unavailable from OpenChart/NSE, and no usable cached CSV exists. "
-        f"Detail: {detail}"
+        "Intraday data unavailable from OpenChart/NSE and recovery sources. "
+        f"Detail: {' | '.join(errors)}"
     )
 
 
 class AlphaVantageProvider:
-    """Only for daily/monthly/fundamental context; never used by load_intraday()."""
+    """Only for daily/monthly/fundamental context; never used by intraday."""
 
     def __init__(self, timeout: int = 20):
         self.key = _get_secret("ALPHAVANTAGE_API_KEY")
