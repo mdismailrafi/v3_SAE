@@ -3,21 +3,26 @@ import pandas as pd
 import streamlit as st
 from scanner.data import load_symbols,fetch_daily,fetch_market_snapshot,fetch_fundamentals
 from scanner.scoring import enrich,score_row,market_regime
+from scanner.events import fetch_announcements,classify_announcements
 
 st.set_page_config(page_title="Indian Market Scanner",page_icon="📡",layout="wide")
 st.title("📡 Indian Market Opportunity Scanner")
-st.caption("Market-wide discovery → ranked candidates → V3.3 deep analysis")
+st.caption("Market-wide discovery → ranked candidates → events → V3.3 deep analysis")
 with st.sidebar:
     st.header("Universe")
     uploaded=st.file_uploader("Optional symbols CSV",type=["csv"])
     max_symbols=st.number_input("Stocks to scan",min_value=5,max_value=500,value=100,step=25)
     period=st.selectbox("History",["6mo","1y","2y"],index=1)
+    event_days=st.number_input("Event lookback (days)",min_value=1,max_value=10,value=3)
     run=st.button("🔎 Scan market",type="primary",use_container_width=True)
-    st.info("Universe: NSE NIFTY 500 best-effort, with manual CSV fallback. Daily recovery feed: Yahoo Finance. Fundamentals are enrichment; V3.3 remains final decision layer.")
+    st.info("NSE NIFTY 500 best-effort universe. Daily data uses Yahoo recovery. NSE corporate announcements add catalyst context. V3.3 remains final decision layer.")
 
 snapshot=fetch_market_snapshot(); regime,regime_score=market_regime(snapshot)
 c1,c2,c3,c4=st.columns(4)
-c1.metric("Market regime",regime); c2.metric("NIFTY 50 20D",f"{snapshot.get('NIFTY50',{}).get('ret20',0)*100:.1f}%" if snapshot.get('NIFTY50',{}).get('ret20') is not None else "—"); c3.metric("NIFTY 50 60D",f"{snapshot.get('NIFTY50',{}).get('ret60',0)*100:.1f}%" if snapshot.get('NIFTY50',{}).get('ret60') is not None else "—"); c4.metric("Regime score",f"{regime_score}/100")
+c1.metric("Market regime",regime)
+c2.metric("NIFTY 50 20D",f"{snapshot.get('NIFTY50',{}).get('ret20',0)*100:.1f}%" if snapshot.get('NIFTY50',{}).get('ret20') is not None else "—")
+c3.metric("NIFTY 50 60D",f"{snapshot.get('NIFTY50',{}).get('ret60',0)*100:.1f}%" if snapshot.get('NIFTY50',{}).get('ret60') is not None else "—")
+c4.metric("Regime score",f"{regime_score}/100")
 
 if run:
     symbols=load_symbols(uploaded)[:int(max_symbols)]; rows=[]; errors=[]; bar=st.progress(0)
@@ -26,6 +31,11 @@ if run:
         if result.frame.empty: errors.append((symbol,result.error)); bar.progress(i/len(symbols)); continue
         try:
             enriched=enrich(result.frame); fundamentals=fetch_fundamentals(symbol); row=score_row(enriched,regime_score,fundamentals)
+            ev=fetch_announcements(symbol,int(event_days)); ev_score,ev_sent,ev_note=classify_announcements(ev)
+            row["event_score"]=ev_score; row["event_sentiment"]=ev_sent; row["event_note"]=ev_note
+            row["intraday_score"]=round(min(100,row["intraday_score"]+max(-10,min(10,ev_score*.5))),1)
+            row["short_score"]=round(min(100,row["short_score"]+max(-10,min(10,ev_score*.5))),1)
+            row["long_score"]=round(min(100,row["long_score"]+max(-5,min(5,ev_score*.25))),1)
             row["symbol"]=symbol; row["source"]=result.source; rows.append(row)
         except Exception as exc: errors.append((symbol,str(exc)))
         bar.progress(i/len(symbols))
@@ -38,20 +48,23 @@ if df.empty: st.error("No stocks produced usable data."); st.stop()
 
 def board(title,score,desc):
     st.subheader(title); st.caption(desc)
-    cols=["symbol",score,"price","rsi","rvol","ret5","ret20","fundamental_score","fresh_breakout","risk_flag"]
-    out=df.sort_values(score,ascending=False).head(20)[cols].copy(); out.columns=["Symbol","Score","Price","RSI","RVOL","5D %","20D %","Fundamental","Fresh breakout","Risk"]
+    cols=["symbol",score,"price","rsi","rvol","ret5","ret20","fundamental_score","event_sentiment","fresh_breakout","risk_flag"]
+    out=df.sort_values(score,ascending=False).head(20)[cols].copy(); out.columns=["Symbol","Score","Price","RSI","RVOL","5D %","20D %","Fundamental","Events","Fresh breakout","Risk"]
     out[["5D %","20D %"]]=(out[["5D %","20D %"]]*100).round(1); st.dataframe(out,use_container_width=True,hide_index=True)
 
-tabs=st.tabs(["🔥 Intraday Top 20","📈 Short-term Top 20","🏦 Long-term Top 20","🚀 Fresh Breakouts","⚠️ Risk / Watch"])
-with tabs[0]: board("Intraday Top 20","intraday_score","Price action + momentum + market regime. Run V3.3 Intraday before trading.")
-with tabs[1]: board("Short-term Top 20","short_score","Days-to-weeks ranking using technical strength, regime, breakout and fundamental enrichment.")
-with tabs[2]: board("Long-term Top 20","long_score","Business/fundamental enrichment + trend + regime. V3.3 performs the final deep fundamental decision.")
+tabs=st.tabs(["🔥 Intraday Top 20","📈 Short-term Top 20","🏦 Long-term Top 20","🚀 Fresh Breakouts","📰 News / Events","⚠️ Risk / Watch"])
+with tabs[0]: board("Intraday Top 20","intraday_score","Price action + momentum + market regime + recent NSE event catalyst. Run V3.3 Intraday before trading.")
+with tabs[1]: board("Short-term Top 20","short_score","Days-to-weeks ranking using technical strength, regime, breakout, fundamentals and event catalyst.")
+with tabs[2]: board("Long-term Top 20","long_score","Fundamental enrichment + trend + regime + limited event context. V3.3 performs final deep fundamental analysis.")
 with tabs[3]:
     st.subheader("Fresh Breakouts — today or previous session")
     b=df[df.fresh_breakout].sort_values("short_score",ascending=False).head(20)
-    st.dataframe(b[["symbol","price","rsi","rvol","ret5","ret20","breakout_today","breakout_previous","atr_pct","fundamental_score","risk_flag"]],use_container_width=True,hide_index=True)
+    st.dataframe(b[["symbol","price","rsi","rvol","ret5","ret20","breakout_today","breakout_previous","atr_pct","fundamental_score","event_sentiment","risk_flag"]],use_container_width=True,hide_index=True)
 with tabs[4]:
-    r=df.sort_values("atr_pct",ascending=False).head(20); st.dataframe(r[["symbol","price","atr_pct","rsi","rvol","ret20","fundamental_score","risk_flag"]],use_container_width=True,hide_index=True)
+    e=df[df.event_sentiment!="NONE"].sort_values("event_score",ascending=False)
+    st.dataframe(e[["symbol","event_score","event_sentiment","event_note","price","ret5","ret20","short_score","risk_flag"]].head(50),use_container_width=True,hide_index=True)
+with tabs[5]:
+    r=df.sort_values("atr_pct",ascending=False).head(20); st.dataframe(r[["symbol","price","atr_pct","rsi","rvol","ret20","fundamental_score","event_sentiment","risk_flag"]],use_container_width=True,hide_index=True)
 
 st.divider(); st.subheader("🔗 V3.3 hand-off"); st.write("The scanner discovers and ranks. V3.3 decides after deeper technical, fundamental, backtest, risk and entry-plan analysis.")
 if st.button("Export current scan CSV"): st.download_button("Download CSV",df.to_csv(index=False).encode(),"market_scanner_results.csv","text/csv")
