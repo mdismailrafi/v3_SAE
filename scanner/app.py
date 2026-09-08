@@ -27,14 +27,16 @@ c3.metric("NIFTY 50 60D", f"{snapshot.get('NIFTY50', {}).get('ret60', 0) * 100:.
 c4.metric("Regime score", f"{regime_score}/100")
 
 if run:
-    symbols = load_symbols(uploaded)[:int(max_symbols)]; rows = []; errors = []; bar = st.progress(0)
-    total = max(1, len(symbols))
+    symbols = load_symbols(uploaded)[:int(max_symbols)]
+    rows = []; errors = []; bar = st.progress(0); total = max(1, len(symbols))
     for i, symbol in enumerate(symbols, 1):
         result = fetch_daily(symbol, period)
         if result.frame.empty:
             errors.append((symbol, result.error)); bar.progress(i / total); continue
         try:
-            enriched = enrich(result.frame); fundamentals = fetch_fundamentals(symbol); row = score_row(enriched, regime_score, fundamentals)
+            enriched = enrich(result.frame)
+            fundamentals = fetch_fundamentals(symbol)
+            row = score_row(enriched, regime_score, fundamentals)
             event_items = fetch_announcements(symbol, days=int(event_days)); event_score, event_sentiment, event_note = classify_announcements(event_items)
             row["event_score"] = event_score; row["event_sentiment"] = event_sentiment; row["event_note"] = event_note
             row["intraday_score"] = round(max(0, min(100, row["intraday_score"] + event_score * .5)), 1)
@@ -44,47 +46,64 @@ if run:
         except Exception as exc:
             errors.append((symbol, str(exc)))
         bar.progress(i / total)
-    bar.empty(); st.session_state["scan_df"] = pd.DataFrame(rows); st.session_state["errors"] = errors
+    bar.empty(); st.session_state["scan_df"] = pd.DataFrame(rows); st.session_state["errors"] = errors; st.session_state["requested_count"] = len(symbols)
 
 if "scan_df" not in st.session_state:
     st.warning("Press **Scan market** to build the opportunity board."); st.stop()
-df = st.session_state["scan_df"]; errors = st.session_state.get("errors", [])
+df = st.session_state["scan_df"].copy(); errors = st.session_state.get("errors", []); requested = st.session_state.get("requested_count", len(df))
 if df.empty: st.error("No stocks produced usable data."); st.stop()
 
-def board(title, score, desc):
+# Backward-compatible session state: a redeploy can preserve an older dataframe without new columns.
+required = {
+    "setup_type": "WATCH", "prebreakout_score": 0.0, "setup_grade": "D — Ignore", "support": float("nan"), "resistance": float("nan"),
+    "support_distance_pct": float("nan"), "resistance_distance_pct": float("nan"), "support_tests": 0, "rsi_slope": float("nan"), "volume_contraction": False
+}
+for col, default in required.items():
+    if col not in df.columns: df[col] = default
+
+st.caption(f"Scanned **{requested}** stocks • **{len(df)}** returned usable market data • **{len(errors)}** data issues")
+
+
+def board(title, score, desc, limit=20):
     st.subheader(title); st.caption(desc)
     cols = ["symbol", score, "price", "rsi", "rvol", "ret5", "ret20", "fundamental_score", "event_sentiment", "fresh_breakout", "risk_flag"]
-    out = df.sort_values(score, ascending=False).head(20)[cols].copy(); out.columns = ["Symbol", "Score", "Price", "RSI", "RVOL", "5D %", "20D %", "Fundamental", "Event", "Breakout", "Risk"]
-    out[["5D %", "20D %"]] = (out[["5D %", "20D %"]] * 100).round(1); st.dataframe(out, use_container_width=True, hide_index=True)
+    out = df.sort_values(score, ascending=False).head(limit)[cols].copy(); out.columns = ["Symbol", "Score", "Price", "RSI", "RVOL", "5D %", "20D %", "Fundamental", "Event", "Breakout", "Risk"]
+    out[["5D %", "20D %"]] = (out[["5D %", "20D %"]] * 100).round(1)
+    st.dataframe(out, use_container_width=True, hide_index=True)
+
 
 def setup_board(title, frame, desc):
     st.subheader(title); st.caption(desc)
+    if frame.empty:
+        st.info("No candidates currently meet this setup's threshold. The scanner will not force weak stocks into the list.")
+        return
     cols = ["symbol", "prebreakout_score", "setup_grade", "setup_type", "price", "support", "support_distance_pct", "support_tests", "resistance", "resistance_distance_pct", "rsi", "rsi_slope", "rvol", "volume_contraction", "fundamental_score", "short_score", "risk_flag"]
-    out = frame.sort_values("prebreakout_score", ascending=False).head(20)[cols].copy()
+    out = frame.sort_values(["prebreakout_score", "short_score"], ascending=False).head(20)[cols].copy()
     out.columns = ["Symbol", "Pre-Breakout", "Grade", "Setup", "Price", "Support", "Support Dist %", "Tests", "Resistance", "Resistance Dist %", "RSI", "RSI Δ", "RVOL", "Vol Contract", "Fundamental", "Short Score", "Risk"]
-    out[["Support Dist %", "Resistance Dist %"]] *= 100; out[["Support Dist %", "Resistance Dist %"]] = out[["Support Dist %", "Resistance Dist %"]].round(1)
+    out[["Support Dist %", "Resistance Dist %"]] *= 100
+    out[["Support Dist %", "Resistance Dist %"]] = out[["Support Dist %", "Resistance Dist %"]].round(1)
     out[["Pre-Breakout", "RSI", "RSI Δ", "RVOL", "Fundamental", "Short Score"]] = out[["Pre-Breakout", "RSI", "RSI Δ", "RVOL", "Fundamental", "Short Score"]].round(1)
     st.dataframe(out, use_container_width=True, hide_index=True)
 
-# The Springboard board deliberately separates setup discovery from a buy call.
+
 tabs = st.tabs(["🔥 Intraday Top 20", "📈 Short-term Top 20", "🏦 Long-term Top 20", "🟢 Springboard", "🚀 Near Breakout", "💰 Accumulation", "🚀 Breakouts", "📰 Events", "🏷️ IPO Watch", "⚠️ Risk"])
 with tabs[0]: board("Intraday Top 20", "intraday_score", "Price action + momentum + market regime + recent corporate catalyst.")
 with tabs[1]: board("Short-term Top 20", "short_score", "Technical strength + pre-breakout setup + regime + fundamentals + catalyst.")
 with tabs[2]: board("Long-term Top 20", "long_score", "Fundamental enrichment + long trend + accumulation setup + regime. V3.3 is final authority.")
 with tabs[3]:
-    s = df[(df.setup_type == "SPRINGBOARD") & (df.prebreakout_score >= 70)].copy()
+    s = df[(df["setup_type"] == "SPRINGBOARD") & (pd.to_numeric(df["prebreakout_score"], errors="coerce") >= 70)].copy()
     setup_board("🟢 Springboard — strong stock sitting near support", s, "Looks for an established trend, nearby support, repeated tests, improving momentum and constructive volume. Best used as a watchlist for a confirmed reversal.")
 with tabs[4]:
-    s = df[(df.setup_type == "NEAR BREAKOUT") & (df.prebreakout_score >= 70)].copy()
+    s = df[(df["setup_type"] == "NEAR BREAKOUT") & (pd.to_numeric(df["prebreakout_score"], errors="coerce") >= 70)].copy()
     setup_board("🚀 Near Breakout — strong stock close to resistance", s, "Candidates are within roughly 5% of a detected resistance zone. Prefer a decisive close above resistance with volume rather than anticipating blindly.")
 with tabs[5]:
-    s = df[(df.volume_contraction) & (df.prebreakout_score >= 60) & (df.fundamental_score >= 55)].copy()
+    s = df[(df["volume_contraction"] == True) & (pd.to_numeric(df["prebreakout_score"], errors="coerce") >= 60) & (pd.to_numeric(df["fundamental_score"], errors="coerce") >= 55)].copy()
     setup_board("💰 Accumulation — supply appears to be drying up", s, "Volume contraction + positive OBV/momentum + acceptable fundamentals. This is an accumulation watchlist, not proof of institutional buying.")
 with tabs[6]:
-    b = df[df.fresh_breakout].sort_values("short_score", ascending=False).head(20)
+    b = df[df["fresh_breakout"]].sort_values("short_score", ascending=False).head(20)
     st.dataframe(b[["symbol", "price", "rsi", "rvol", "ret5", "ret20", "breakout_today", "breakout_previous", "atr_pct", "fundamental_score", "event_sentiment", "risk_flag"]], use_container_width=True, hide_index=True)
 with tabs[7]:
-    e = df[df.event_sentiment != "NONE"].copy().sort_values("event_score", ascending=False)
+    e = df[df["event_sentiment"] != "NONE"].copy().sort_values("event_score", ascending=False)
     st.dataframe(e[["symbol", "event_score", "event_sentiment", "event_note", "short_score", "fresh_breakout"]].head(50), use_container_width=True, hide_index=True)
 with tabs[8]:
     ipo = score_ipo(fetch_ipo_data())
